@@ -68,8 +68,16 @@ set(CXX "${TOOLCHAIN}/${CROSS_PREFIX}${API}-clang++")
 set(AR "${TOOLCHAIN}/llvm-ar")
 set(AS "${TOOLCHAIN}/${CROSS_PREFIX}${API}-clang")
 set(NM "${TOOLCHAIN}/llvm-nm")
+set(READELF "${TOOLCHAIN}/llvm-readelf")
 set(STRIP "${TOOLCHAIN}/llvm-strip")
 set(RANLIB "${TOOLCHAIN}/llvm-ranlib")
+
+# Android devices can use 16 KiB memory pages. Align 64-bit ELF load segments accordingly;
+# 32-bit Android ABIs remain on their established 4 KiB alignment.
+set(EXTRA_LDFLAGS "-Wl,--gc-sections -s")
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
+    string(APPEND EXTRA_LDFLAGS " -Wl,-z,max-page-size=16384")
+endif()
 
 # Ensure FFmpeg source exists
 if(NOT EXISTS "${FFMPEG_SOURCE_DIR}/configure")
@@ -116,7 +124,7 @@ add_custom_command(
         --enable-ffmpeg
         --enable-small
         --extra-cflags=-Os\ -fdata-sections\ -ffunction-sections
-        --extra-ldflags=-Wl,--gc-sections\ -s
+        --extra-ldflags=${EXTRA_LDFLAGS}
         --enable-cross-compile
         --cc=${CC}
         --cxx=${CXX}
@@ -169,14 +177,20 @@ add_custom_command(
     COMMAND_ECHO STDOUT
 )
 
-# UPX compression only if hash changes or UPX not yet applied
-if(UPX_AVAILABLE)
+# UPX can reduce a 64-bit binary's PT_LOAD alignment back to 4 KiB. Keep 64-bit output
+# uncompressed so the linker's 16 KiB alignment survives into the published AAR.
+if(UPX_AVAILABLE AND NOT (ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64"))
     add_custom_command(
         OUTPUT "${OUTPUT_LIB_PATH}.upx"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${FINAL_LIB_DIR}"
         COMMAND ${CMAKE_COMMAND} -E copy "${OUTPUT_LIB_PATH}" "${FINAL_LIB_PATH}"
         COMMAND ${CMAKE_COMMAND} -E echo "Compressing with UPX..."
         COMMAND "${UPX_PATH}" --best "${FINAL_LIB_PATH}" || ${CMAKE_COMMAND} -E true
+        COMMAND ${CMAKE_COMMAND}
+            -DREADELF=${READELF}
+            -DELF_FILE=${FINAL_LIB_PATH}
+            -DANDROID_ABI=${ANDROID_ABI}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyElfAlignment.cmake
         COMMAND ${CMAKE_COMMAND} -E touch "${OUTPUT_LIB_PATH}.upx"
         DEPENDS "${OUTPUT_LIB_PATH}" "${UPX_HASH_FILE}"
         COMMENT "Compressing libffmpeg.so with UPX and copying to final location"
@@ -188,10 +202,15 @@ if(UPX_AVAILABLE)
 else()
     add_custom_command(
         OUTPUT "${OUTPUT_LIB_PATH}.upx"
-        COMMAND ${CMAKE_COMMAND} -E echo "Skipping UPX compression. UPX not available."
-        COMMAND ${CMAKE_COMMAND} -E touch "${OUTPUT_LIB_PATH}.upx"
+        COMMAND ${CMAKE_COMMAND} -E echo "Skipping UPX compression to preserve ELF alignment."
         COMMAND ${CMAKE_COMMAND} -E make_directory "${FINAL_LIB_DIR}"
         COMMAND ${CMAKE_COMMAND} -E copy "${OUTPUT_LIB_PATH}" "${FINAL_LIB_PATH}"
+        COMMAND ${CMAKE_COMMAND}
+            -DREADELF=${READELF}
+            -DELF_FILE=${FINAL_LIB_PATH}
+            -DANDROID_ABI=${ANDROID_ABI}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/VerifyElfAlignment.cmake
+        COMMAND ${CMAKE_COMMAND} -E touch "${OUTPUT_LIB_PATH}.upx"
         DEPENDS "${OUTPUT_LIB_PATH}"
         COMMENT "Copying libffmpeg.so to final location without UPX"
         VERBATIM
